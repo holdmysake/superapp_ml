@@ -30,10 +30,6 @@ def create_app():
     except Exception as e:
         print(f"Database connection failed: {e}")
 
-    @app.route("/")
-    def index():
-        return jsonify({"message": "Welcome to the Flask app with MySQL!!!"})
-
     app.register_blueprint(predict_bp)
 
     return app
