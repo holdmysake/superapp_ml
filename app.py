@@ -32,7 +32,7 @@ def create_app():
 
     @app.route("/")
     def index():
-        return jsonify({"message": "Welcome to the Flask app with MySQL!!!!!"})
+        return jsonify({"message": "Welcome to the Flask app with MySQL!!!"})
 
     app.register_blueprint(predict_bp)
 
