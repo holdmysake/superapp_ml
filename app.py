@@ -1,7 +1,7 @@
-# filepath: /d:/fol_super_app/superapp_ml/app.py
 from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv # type: ignore
+from flask_cors import CORS # type: ignore
 import os
 from urllib.parse import quote
 from sqlalchemy import text # type: ignore
@@ -12,6 +12,7 @@ load_dotenv()
 
 def create_app():
     app = Flask(__name__)
+    CORS(app)  # Enable CORS for the entire app
 
     db_password = quote(os.getenv('DB_PASSWORD'))
 
