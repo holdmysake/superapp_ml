@@ -4,8 +4,6 @@ import numpy as np
 from extensions import db
 from models import Trunkline, Spot
 from predict_utils import (
-    PIPELINES,
-    TLINE_TO_PIPELINE,
     load_coords,
     get_latlon_at_km,
     load_historical_data,
@@ -44,13 +42,14 @@ def predict(tline_id):
         if len(d) != n_sensors:
             return jsonify({'error': f'drop[{i}] harus {n_sensors} elemen'}), 400
 
-    # Get pipeline config from registry
-    pipeline_key = TLINE_TO_PIPELINE.get(tline_id)
-    if not pipeline_key or pipeline_key not in PIPELINES:
-        return jsonify({'error': f'Pipeline configuration for {tline_id} not found in registry'}), 500
+    # Dynamic paths based on folder structure matching tline_id
+    xlsx_path = f"data/{tline_id}/xlsx.xlsx"
+    json_path = f"data/{tline_id}/json.json"
 
-    cfg = PIPELINES[pipeline_key]
-    coords = load_coords(cfg['xlsx'])
+    coords = load_coords(xlsx_path)
+
+    # Load historical calibration data if the JSON file exists
+    hist_data = load_historical_data(json_path)
 
     results = []
     for idx, drop_arr in enumerate(drop_list):
@@ -70,9 +69,8 @@ def predict(tline_id):
 
         try:
             # Build calibration
-            hist_data = load_historical_data(cfg['historical_data'])
             hist_json_tuple = tuple(json.dumps(rec, sort_keys=True) for rec in hist_data)
-            calib = build_calibration(hist_json_tuple, tuple(cfg['sensor_kp']))
+            calib = build_calibration(hist_json_tuple, tuple(sensor_locations))
 
             # Instantiate analyzer & run analysis
             analyzer = PipelineLeakAnalyzer(active_locs, active_norm, active_drop, calibration=calib)
