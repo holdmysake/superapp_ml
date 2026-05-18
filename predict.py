@@ -1,14 +1,21 @@
 from flask import Blueprint, request, jsonify
+import json
+import numpy as np
 from extensions import db
 from models import Trunkline, Spot
-from predict_utils import load_and_prepare_model
+from predict_utils import (
+    PIPELINES,
+    TLINE_TO_PIPELINE,
+    load_coords,
+    get_latlon_at_km,
+    load_historical_data,
+    build_calibration,
+    PipelineLeakAnalyzer
+)
 
 predict_bp = Blueprint('predict_bp', __name__)
 
 def predict(tline_id):
-    model_file     = f"data/{tline_id}/sav.sav"
-    elevation_file = f"data/{tline_id}/xlsx.xlsx"
-
     data = request.get_json()
     if not data or 'normal' not in data or 'drop' not in data:
         return jsonify({'error': 'Invalid input, normal and drop are required'}), 400
@@ -37,14 +44,39 @@ def predict(tline_id):
         if len(d) != n_sensors:
             return jsonify({'error': f'drop[{i}] harus {n_sensors} elemen'}), 400
 
-    model, gps_mapper, load_error = load_and_prepare_model(model_file, elevation_file)
-    if load_error:
-        return jsonify({'error': load_error}), 500
+    # Get pipeline config from registry
+    pipeline_key = TLINE_TO_PIPELINE.get(tline_id)
+    if not pipeline_key or pipeline_key not in PIPELINES:
+        return jsonify({'error': f'Pipeline configuration for {tline_id} not found in registry'}), 500
+
+    cfg = PIPELINES[pipeline_key]
+    coords = load_coords(cfg['xlsx'])
 
     results = []
     for idx, drop_arr in enumerate(drop_list):
+        # Filter active sensors (Offline sensor if Normal P == 0 and Drop P == 0)
+        kp_arr   = np.array(sensor_locations)
+        norm_arr = np.array(normal)
+        drop_arr = np.array(drop_arr)
+
+        active_mask = ~((norm_arr == 0) & (drop_arr == 0))
+        active_locs = kp_arr[active_mask]
+        active_norm = norm_arr[active_mask]
+        active_drop = drop_arr[active_mask]
+        n_active = int(np.sum(active_mask))
+
+        if n_active < 2:
+            return jsonify({'error': f'Minimal 2 sensor aktif untuk drop ke-{idx}! Saat ini hanya {n_active}.'}), 400
+
         try:
-            prediction = model.predict(sensor_locations, normal, drop_arr, sensor_names)
+            # Build calibration
+            hist_data = load_historical_data(cfg['historical_data'])
+            hist_json_tuple = tuple(json.dumps(rec, sort_keys=True) for rec in hist_data)
+            calib = build_calibration(hist_json_tuple, tuple(cfg['sensor_kp']))
+
+            # Instantiate analyzer & run analysis
+            analyzer = PipelineLeakAnalyzer(active_locs, active_norm, active_drop, calibration=calib)
+            prediction = analyzer.run_full_analysis()
         except Exception as e:
             return jsonify({'error': f'Prediction drop[{idx}] failed: {str(e)}'}), 500
 
@@ -53,9 +85,10 @@ def predict(tline_id):
         conf     = prediction['confidence']
 
         maps_link = None
-        if gps_mapper is not None:
+        if coords:
             try:
-                maps_link = gps_mapper.get_google_maps_link(final_kp, zoom=18)
+                leak_lat, leak_lon, _ = get_latlon_at_km(coords, final_kp)
+                maps_link = f"https://www.google.com/maps?q={leak_lat:.6f},{leak_lon:.6f}"
             except Exception as e:
                 maps_link = f"GPS error: {str(e)}"
 
