@@ -1,3 +1,4 @@
+import os
 from flask import Blueprint, request, jsonify
 import json
 import numpy as np
@@ -8,7 +9,10 @@ from predict_utils import (
     get_latlon_at_km,
     load_historical_data,
     build_calibration,
-    PipelineLeakAnalyzer
+    PipelineLeakAnalyzer,
+    detect_outlier_sensors,
+    elev_arrays,
+    elev_at_km
 )
 
 predict_bp = Blueprint('predict_bp', __name__)
@@ -42,11 +46,23 @@ def predict(tline_id):
         if len(d) != n_sensors:
             return jsonify({'error': f'drop[{i}] harus {n_sensors} elemen'}), 400
 
-    # Dynamic paths based on folder structure matching tline_id
+    # Robust path resolution for xlsx files
     xlsx_path = f"data/{tline_id}/xlsx.xlsx"
+    if not os.path.exists(xlsx_path):
+        xlsx_path = f"data/{tline_id}/xlsx.xlsx.xlsx"
+        if not os.path.exists(xlsx_path):
+            dir_path = f"data/{tline_id}"
+            if os.path.exists(dir_path):
+                files = os.listdir(dir_path)
+                xlsx_files = [f for f in files if f.endswith('.xlsx')]
+                if xlsx_files:
+                    xlsx_path = os.path.join(dir_path, xlsx_files[0])
+
     json_path = f"data/{tline_id}/json.json"
 
     coords = load_coords(xlsx_path)
+    elev_km, elev_m = elev_arrays(coords)
+    hgl_available = elev_km is not None
 
     # Load historical calibration data if the JSON file exists
     hist_data = load_historical_data(json_path)
@@ -67,13 +83,46 @@ def predict(tline_id):
         if n_active < 2:
             return jsonify({'error': f'Minimal 2 sensor aktif untuk drop ke-{idx}! Saat ini hanya {n_active}.'}), 400
 
+        # v5.1 Outlier detection & auto-exclusion
+        auto_exclude = True
+        out_idx = detect_outlier_sensors(active_locs, active_norm, active_drop)
+        if out_idx and auto_exclude:
+            keep = np.array([i not in out_idx for i in range(len(active_locs))])
+            active_locs = active_locs[keep]
+            active_norm = active_norm[keep]
+            active_drop = active_drop[keep]
+            n_active = len(active_locs)
+            if n_active < 2:
+                return jsonify({'error': f'Terlalu banyak sensor outlier dikeluarkan untuk drop ke-{idx}!'}), 400
+
+        active_elev = elev_at_km(elev_km, elev_m, active_locs) if hgl_available else None
+        elev_tuple = (tuple(elev_km.tolist()), tuple(elev_m.tolist())) if hgl_available else None
+
+        sg = 0.85 # default specific gravity
+        if tline_id == "r1":
+            sg = 0.85
+
         try:
             # Build calibration
             hist_json_tuple = tuple(json.dumps(rec, sort_keys=True) for rec in hist_data)
-            calib = build_calibration(hist_json_tuple, tuple(sensor_locations))
+            calib = build_calibration(
+                hist_json_tuple,
+                tuple(sensor_locations),
+                elev_tuple=elev_tuple,
+                sg=sg,
+                auto_exclude=auto_exclude,
+                weight_power=2
+            )
 
             # Instantiate analyzer & run analysis
-            analyzer = PipelineLeakAnalyzer(active_locs, active_norm, active_drop, calibration=calib)
+            analyzer = PipelineLeakAnalyzer(
+                active_locs,
+                active_norm,
+                active_drop,
+                elev=active_elev,
+                sg=sg,
+                calibration=calib
+            )
             prediction = analyzer.run_full_analysis()
         except Exception as e:
             return jsonify({'error': f'Prediction drop[{idx}] failed: {str(e)}'}), 500
@@ -100,6 +149,10 @@ def predict(tline_id):
             'drop_index':       idx,
             'message':          message,
             'google_maps_link': maps_link,
+            'final_estimate':   final_kp,
+            'estimate_std':     std,
+            'confidence':       conf,
+            'method_estimates': prediction.get('method_estimates', {}),
         })
     
     return jsonify(results), 200
@@ -123,3 +176,7 @@ def predict_ktt_kas():
 @predict_bp.route("/predict_sgl_kas", methods=['POST'])
 def predict_sgl_kas():
     return predict("sgl_kas")
+
+@predict_bp.route("/predict_r1", methods=['POST'])
+def predict_r1():
+    return predict("r1")

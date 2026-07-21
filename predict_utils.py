@@ -100,82 +100,161 @@ def load_historical_data(file_or_list) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CALIBRATION
+# CALIBRATION v5.1 — bias shrinkage n/(n+2) + weight (1/MAE)^power
+# historical_data di-pass sebagai tuple of JSON strings (hashable utk cache)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=32)
-def build_calibration(historical_json_tuple: tuple, sensor_locs_tuple: tuple):
-    """
-    historical_json_tuple : tuple of JSON strings — tiap string = 1 record dict.
-    sensor_locs_tuple     : tuple of float KP locations.
-    """
+def build_calibration(historical_json_tuple: tuple, sensor_locs_tuple: tuple,
+                      elev_tuple=None, sg: float=0.85, auto_exclude: bool=True, weight_power: int=2):
     if not historical_json_tuple:
         return None
     historical_data = [json.loads(s) for s in historical_json_tuple]
 
     sensor_locs = np.array(sensor_locs_tuple)
-    method_keys = ['suspicion_index', 'gradient', 'region', 'interpolation', 'weighted', 'transition']
-    errors = {k: [] for k in method_keys}
+    if elev_tuple is not None:
+        e_km = np.array(elev_tuple[0])
+        e_m = np.array(elev_tuple[1])
+        sensor_elev_all = np.interp(sensor_locs, e_km, e_m)
+    else:
+        sensor_elev_all = None
 
+    errors = {}
+    def _add(k, v, actual):
+        errors.setdefault(k, []).append(v - actual)
+
+    n_valid = 0
     for rec in historical_data:
         norm_arr = np.array(rec['sensor_normal'], dtype=float)
         drop_arr = np.array(rec['sensor_drop'],   dtype=float)
         actual   = float(rec['actual_leak_km'])
+
         n = min(len(norm_arr), len(drop_arr), len(sensor_locs))
-        locs_ = sensor_locs[:n]
-        norm_ = norm_arr[:n]
-        drop_ = drop_arr[:n]
-        mask  = ~((norm_ == 0) & (drop_ == 0))
-        locs_ = locs_[mask]
-        norm_ = norm_[mask]
-        drop_ = drop_[mask]
+        mask  = ~((norm_arr[:n] == 0) & (drop_arr[:n] == 0))
+        locs_ = sensor_locs[:n][mask]
+        norm_ = norm_arr[:n][mask]
+        drop_ = drop_arr[:n][mask]
+        elev_ = sensor_elev_all[:n][mask] if sensor_elev_all is not None else None
+
+        # outlier exclusion konsisten dengan input utama
+        if auto_exclude and len(locs_) >= 4:
+            out = detect_outlier_sensors(locs_, norm_, drop_)
+            if out:
+                keep = np.array([i not in out for i in range(len(locs_))])
+                locs_, norm_, drop_ = locs_[keep], norm_[keep], drop_[keep]
+                if elev_ is not None:
+                    elev_ = elev_[keep]
+
         if len(locs_) < 2:
             continue
+        n_valid += 1
 
-        az = PipelineLeakAnalyzer(locs_, norm_, drop_, calibration=None)
-        si = az.calculate_suspicion_index()
+        az = PipelineLeakAnalyzer(locs_, norm_, drop_, elev=elev_, sg=sg, calibration=None)
+        si      = az.calculate_suspicion_index()
         grads   = az.calculate_gradients()
         regions = az.region_analysis()
 
-        pred = {
-            'suspicion_index': float(locs_[np.argmax(si)]),
-            'gradient':        float(grads['locations'][int(np.argmax(grads['change']))]) if grads['change'] else float(np.mean(locs_)),
-            'region':          float(regions[0]['center']) if regions else float(np.mean(locs_)),
-            'interpolation':   az.interpolate_location(),
-            'weighted':        az.weighted_average_location(si),
-            'transition':      az.transition_point_analysis(),
-        }
-        for k in method_keys:
-            errors[k].append(pred[k] - actual)
+        _add('suspicion_index', float(locs_[np.argmax(si)]), actual)
+        _add('gradient',
+             float(grads['locations'][int(np.argmax(grads['change']))]) if grads['change'] else float(np.mean(locs_)),
+             actual)
+        _add('region',        float(regions[0]['center']), actual)
+        _add('interpolation', az.interpolate_location(),   actual)
+        _add('weighted',      az.weighted_average_location(si), actual)
+        _add('transition',    az.transition_point_analysis(),   actual)
 
-    if not errors['suspicion_index']:
+        bk, _ = az.hgl_slope_break()
+        if bk is not None:
+            _add('hgl_slope_break', bk, actual)
+        rt = az.hgl_gradient_ratio()
+        if rt is not None:
+            _add('hgl_grad_ratio', rt, actual)
+
+    if not errors.get('suspicion_index'):
         return None
 
-    bias    = {k: float(np.mean(errors[k])) for k in method_keys}
-    mae     = {k: float(np.mean(np.abs(errors[k]))) for k in method_keys}
+    method_keys = list(errors.keys())
+    shrink  = n_valid / (n_valid + 2.0)   # n=1→0.33 | n=3→0.60 | n=10→0.83
+    bias    = {k: float(np.mean(errors[k])) * shrink for k in method_keys}
+    mae     = {k: float(np.mean(np.abs(np.array(errors[k]) - bias[k]))) for k in method_keys}
     eps     = 0.5
-    wr      = {k: 1.0 / (mae[k] + eps) for k in method_keys}
+    wr      = {k: (1.0 / (mae[k] + eps)) ** weight_power for k in method_keys}
     tw      = sum(wr.values())
     weights = {k: wr[k] / tw * len(method_keys) for k in method_keys}
-    return {'n_samples': len(historical_data), 'bias': bias, 'mae': mae, 'weights': weights}
+    return {'n_samples': n_valid, 'shrink': shrink, 'bias': bias, 'mae': mae, 'weights': weights}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ANALYZER CLASS
+# v5.1: DETEKSI SENSOR OUTLIER (ΔP tidak konsisten dengan tetangga)
+# Rule: |residual| > 3 psi DAN |residual| > 40% dari ekspektasi.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_outlier_sensors(locs, norm, drop):
+    locs = np.array(locs)
+    norm = np.array(norm)
+    drop = np.array(drop)
+    dP = norm - drop
+    out = []
+    for i in range(1, len(locs) - 1):
+        exp = np.interp(locs[i], [locs[i-1], locs[i+1]], [dP[i-1], dP[i+1]])
+        res = dP[i] - exp
+        if abs(res) > 3.0 and abs(res) > 0.4 * abs(exp):
+            out.append(i)
+    return out
+
+
+def elev_arrays(coords):
+    if not coords:
+        return None, None
+    return (np.array([p['km'] for p in coords], dtype=float),
+            np.array([p['elev'] for p in coords], dtype=float))
+
+
+def elev_at_km(elev_km, elev_m, km):
+    if elev_km is None:
+        return None
+    return np.interp(km, elev_km, elev_m)
+
+
+def make_historical_json_tuple(historical_data: list) -> tuple:
+    return tuple(json.dumps(d, sort_keys=True) for d in historical_data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANALYZER CLASS v5.1 — 6 pressure-based + 2 HGL methods
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PipelineLeakAnalyzer:
-    def __init__(self, locations, normal_p, drop_p, calibration=None):
+    """
+    Metode 1-6 pressure-based (elevasi cancel out pada ΔP).
+    Metode 7-8 HGL-based (butuh elevasi + SG):
+      7. HGL Slope-Break  : fit 2 garis piecewise ke HGL drop; break = leak
+      8. HGL Gradient Ratio: transisi rasio gradien drop/normal per segmen
+    HGL = P(psi) × 0.70307 / SG + z(m)
+    """
+    PSI_TO_M = 0.703070
+
+    def __init__(self, locations, normal_p, drop_p, elev=None, sg=0.85, calibration=None):
         self.locations   = np.array(locations, dtype=float)
         self.normal_p    = np.array(normal_p,  dtype=float)
         self.drop_p      = np.array(drop_p,    dtype=float)
         self.n_sensors   = len(self.locations)
         self.calibration = calibration
+        self.sg          = float(sg)
         self.delta_p     = self.normal_p - self.drop_p
         with np.errstate(divide='ignore', invalid='ignore'):
             self.pressure_ratio = np.abs(self.delta_p) / np.abs(self.normal_p) * 100
         self.pressure_ratio = np.nan_to_num(self.pressure_ratio, nan=0.0, posinf=0.0, neginf=0.0)
         self.abs_delta_p    = np.abs(self.delta_p)
+
+        if elev is not None:
+            self.elev     = np.array(elev, dtype=float)
+            c             = self.PSI_TO_M / self.sg
+            self.hgl_norm = self.normal_p * c + self.elev
+            self.hgl_drop = self.drop_p   * c + self.elev
+        else:
+            self.elev = self.hgl_norm = self.hgl_drop = None
+
         self.results = {}
 
     def _apply_bias(self, key, raw):
@@ -183,6 +262,7 @@ class PipelineLeakAnalyzer:
             return raw - self.calibration['bias'][key]
         return raw
 
+    # ── Metode 1-6 ──
     def calculate_suspicion_index(self):
         si = np.zeros(self.n_sensors)
         for i in range(self.n_sensors):
@@ -260,6 +340,46 @@ class PipelineLeakAnalyzer:
                 tp = (self.locations[i] + self.locations[i+1]) / 2
         return float(tp)
 
+    # ── Metode 7 (v5): HGL Slope-Break ──
+    def hgl_slope_break(self):
+        if self.hgl_drop is None or self.n_sensors < 4:
+            return None, None
+        x, y = self.locations, self.hgl_drop
+        best_sse, best = np.inf, None
+        for k in range(2, self.n_sensors - 1):
+            cu = np.polyfit(x[:k], y[:k], 1)
+            cd = np.polyfit(x[k:], y[k:], 1)
+            sse = (np.sum((np.polyval(cu, x[:k]) - y[:k])**2) +
+                   np.sum((np.polyval(cd, x[k:]) - y[k:])**2))
+            if sse < best_sse:
+                if abs(cu[0] - cd[0]) < 1e-12:
+                    xb = (x[k-1] + x[k]) / 2
+                else:
+                    xb = (cd[1] - cu[1]) / (cu[0] - cd[0])
+                xb = float(np.clip(xb, x[0], x[-1]))
+                best_sse = sse
+                best = {'split_idx': k, 'coef_up': cu.tolist(),
+                        'coef_dn': cd.tolist(), 'break_km': xb, 'sse': float(sse)}
+        return (best['break_km'], best) if best else (None, None)
+
+    # ── Metode 8 (v5): HGL Gradient Ratio ──
+    def hgl_gradient_ratio(self):
+        if self.hgl_norm is None or self.n_sensors < 3:
+            return None
+        x  = self.locations
+        gn = np.diff(self.hgl_norm) / np.diff(x)
+        gd = np.diff(self.hgl_drop) / np.diff(x)
+        r  = np.where(np.abs(gn) > 1e-9, gd / gn, 1.0)
+        n_seg = len(r)
+        best_gain, best_b = -np.inf, None
+        for b in range(1, n_seg):
+            gain = float(np.mean(r[:b]) - np.mean(r[b:]))
+            if gain > best_gain:
+                best_gain, best_b = gain, b
+        if best_b is None:
+            return None
+        return float(x[best_b])
+
     def run_full_analysis(self):
         si      = self.calculate_suspicion_index()
         top_idx = int(np.argmax(si))
@@ -274,10 +394,26 @@ class PipelineLeakAnalyzer:
             'weighted':        self.weighted_average_location(si),
             'transition':      self.transition_point_analysis(),
         }
-        corrected = {k: self._apply_bias(k, v) for k, v in raw.items()}
-        pipe_max  = self.locations.max() + 5
-        corrected = {k: float(np.clip(v, 0, pipe_max)) for k, v in corrected.items()}
 
+        hgl_break_km, hgl_fit = self.hgl_slope_break()
+        hgl_ratio_km          = self.hgl_gradient_ratio()
+        if hgl_break_km is not None:
+            raw['hgl_slope_break'] = hgl_break_km
+        if hgl_ratio_km is not None:
+            raw['hgl_grad_ratio'] = hgl_ratio_km
+
+        corrected = {k: self._apply_bias(k, v) for k, v in raw.items()}
+        lo, hi = self.locations.min(), self.locations.max() + 5
+        corrected = {k: float(np.clip(v, lo, hi)) for k, v in corrected.items()}
+
+        method_order = list(corrected.keys())
+        if self.calibration and 'weights' in self.calibration:
+            w = np.array([self.calibration['weights'].get(k, 1.0) for k in method_order])
+        else:
+            defw = {'hgl_slope_break': 3.0, 'hgl_grad_ratio': 2.0}
+            w = np.array([defw.get(k, 1.0) for k in method_order])
+
+        estimates = np.array([corrected[k] for k in method_order])
         self.results.update({
             'suspicion_index':        si,
             'top_sensor_idx':         top_idx,
@@ -288,24 +424,20 @@ class PipelineLeakAnalyzer:
             'interpolation_location': corrected['interpolation'],
             'weighted_location':      corrected['weighted'],
             'transition_location':    corrected['transition'],
+            'hgl_break_location':     corrected.get('hgl_slope_break'),
+            'hgl_ratio_location':     corrected.get('hgl_grad_ratio'),
+            'hgl_fit':                hgl_fit,
             'gradients': grads, 'regions': regions, 'top_region': regions[0],
+            'final_estimate':  float(np.average(estimates, weights=w)),
+            'estimate_std':    float(np.std(estimates)),
+            'method_weights':  dict(zip(method_order, w.tolist())),
+            'method_estimates': corrected,
         })
 
-        method_order = ['suspicion_index', 'gradient', 'region', 'interpolation', 'weighted', 'transition']
-        estimates    = np.array([corrected[k] for k in method_order])
-        if self.calibration and 'weights' in self.calibration:
-            w = np.array([self.calibration['weights'].get(k, 1.0) for k in method_order])
-        else:
-            w = np.ones(len(method_order))
-
-        self.results['final_estimate']  = float(np.average(estimates, weights=w))
-        self.results['estimate_std']    = float(np.std(estimates))
-        self.results['method_weights']  = dict(zip(method_order, w.tolist()))
-
         std = self.results['estimate_std']
-        if std < 3:    conf = "HIGH (90-95%)"
-        elif std < 6:  conf = "HIGH (85-90%)"
-        elif std < 10: conf = "MEDIUM (75-85%)"
+        if std < 5:    conf = "HIGH (90-95%)"
+        elif std < 10: conf = "HIGH (85-90%)"
+        elif std < 15: conf = "MEDIUM (75-85%)"
         else:          conf = "MEDIUM (70-75%)"
         self.results['confidence'] = conf
         return self.results
