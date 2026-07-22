@@ -30,7 +30,7 @@ PIPELINES = {
 
     "RTU": {
         "label":        "RTU (Crude Oil) — 63.4 km",
-        "xlsx":         "rtuelev.xlsx",          # lat/lon/elev → KP haversine + peta + HGL
+        "xlsx":         "xlsx.xlsx",          # lat/lon/elev → KP haversine + peta + HGL
         "length_km":    63.4,
         "diameter_in":  7.981,
         "wall_thk_in":  0.322,

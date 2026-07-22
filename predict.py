@@ -167,7 +167,7 @@ def predict_r1_logic():
     # Robust path resolution for xlsx files
     xlsx_path = "data/r1/xlsx.xlsx"
     if not os.path.exists(xlsx_path):
-        xlsx_path = "data/r1/xlsx.xlsx.xlsx"
+        xlsx_path = "data/r1/xlsx.xlsx"
         if not os.path.exists(xlsx_path):
             dir_path = "data/r1"
             if os.path.exists(dir_path):
