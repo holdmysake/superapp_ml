@@ -97,10 +97,34 @@ def predict(tline_id):
             f"Tingkat keakuratan prediksi sebesar {conf}."
         )
 
+        sensor_details = []
+        for i in range(len(analyzer.locations)):
+            sensor_details.append({
+                'kp': float(analyzer.locations[i]),
+                'normal_p': float(analyzer.normal_p[i]),
+                'drop_p': float(analyzer.drop_p[i]),
+                'delta_p': float(analyzer.delta_p[i]),
+                'abs_delta_p': float(analyzer.abs_delta_p[i]),
+                'pressure_ratio': float(analyzer.pressure_ratio[i]),
+                'suspicion_index': float(prediction['suspicion_index'][i]),
+                'elev': None,
+                'hgl_norm': None,
+                'hgl_drop': None,
+            })
+
         results.append({
             'drop_index':       idx,
             'message':          message,
             'google_maps_link': maps_link,
+            'final_estimate':   final_kp,
+            'estimate_std':     std,
+            'confidence':       conf,
+            'method_estimates': prediction.get('method_estimates', {}),
+            'method_weights':   prediction.get('method_weights', {}),
+            'gradients':        prediction.get('gradients', {}),
+            'regions':          prediction.get('regions', []),
+            'hgl_fit':          None,
+            'sensors':          sensor_details
         })
     
     return jsonify(results), 200
@@ -261,6 +285,21 @@ def predict_r1_logic():
             f"Tingkat keakuratan prediksi sebesar {conf}."
         )
 
+        sensor_details = []
+        for i in range(len(analyzer.locations)):
+            sensor_details.append({
+                'kp': float(analyzer.locations[i]),
+                'normal_p': float(analyzer.normal_p[i]),
+                'drop_p': float(analyzer.drop_p[i]),
+                'delta_p': float(analyzer.delta_p[i]),
+                'abs_delta_p': float(analyzer.abs_delta_p[i]),
+                'pressure_ratio': float(analyzer.pressure_ratio[i]),
+                'suspicion_index': float(prediction['suspicion_index'][i]),
+                'elev': float(analyzer.elev[i]) if analyzer.elev is not None else None,
+                'hgl_norm': float(analyzer.hgl_norm[i]) if analyzer.hgl_norm is not None else None,
+                'hgl_drop': float(analyzer.hgl_drop[i]) if analyzer.hgl_drop is not None else None,
+            })
+
         results.append({
             'drop_index':       idx,
             'message':          message,
@@ -269,6 +308,11 @@ def predict_r1_logic():
             'estimate_std':     std,
             'confidence':       conf,
             'method_estimates': prediction.get('method_estimates', {}),
+            'method_weights':   prediction.get('method_weights', {}),
+            'gradients':        prediction.get('gradients', {}),
+            'regions':          prediction.get('regions', []),
+            'hgl_fit':          prediction.get('hgl_fit'),
+            'sensors':          sensor_details
         })
     
     return jsonify(results), 200
