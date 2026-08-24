@@ -1,9 +1,19 @@
 import os
+import random
+import string
+from datetime import datetime
 from flask import Blueprint, request, jsonify
 import json
 import numpy as np
 from extensions import db
-from models import Trunkline, Spot
+from models import Trunkline, Spot, PredRes
+
+def generate_pred_res_id():
+    # Format: PR + YYMMDD + 7 random characters = 15 characters
+    prefix = "PR" + datetime.now().strftime("%y%m%d")
+    chars = string.ascii_uppercase + string.digits
+    suffix = "".join(random.choices(chars, k=7))
+    return prefix + suffix
 from predict_utils import (
     load_coords,
     get_latlon_at_km,
@@ -112,7 +122,32 @@ def predict(tline_id):
                 'hgl_drop': None,
             })
 
+        pred_res_id = generate_pred_res_id()
+        timestamp = datetime.now()
+
+        pred_entry = PredRes(
+            pred_res_id=pred_res_id,
+            tline_id=tline_id,
+            drop_index=idx,
+            message=message,
+            google_maps_link=maps_link,
+            final_estimate=final_kp,
+            estimate_std=std,
+            confidence=conf,
+            method_estimates=prediction.get('method_estimates', {}),
+            method_weights=prediction.get('method_weights', {}),
+            gradients=prediction.get('gradients', {}),
+            regions=prediction.get('regions', []),
+            hgl_fit=None,
+            sensors=sensor_details,
+            is_saved=False,
+            timestamp=timestamp
+        )
+        db.session.add(pred_entry)
+        db.session.commit()
+
         results.append({
+            'pred_res_id':      pred_res_id,
             'drop_index':       idx,
             'message':          message,
             'google_maps_link': maps_link,
@@ -300,7 +335,32 @@ def predict_r1_logic():
                 'hgl_drop': float(analyzer.hgl_drop[i]) if analyzer.hgl_drop is not None else None,
             })
 
+        pred_res_id = generate_pred_res_id()
+        timestamp = datetime.now()
+
+        pred_entry = PredRes(
+            pred_res_id=pred_res_id,
+            tline_id="r1",
+            drop_index=idx,
+            message=message,
+            google_maps_link=maps_link,
+            final_estimate=final_kp,
+            estimate_std=std,
+            confidence=conf,
+            method_estimates=prediction.get('method_estimates', {}),
+            method_weights=prediction.get('method_weights', {}),
+            gradients=prediction.get('gradients', {}),
+            regions=prediction.get('regions', []),
+            hgl_fit=prediction.get('hgl_fit'),
+            sensors=sensor_details,
+            is_saved=False,
+            timestamp=timestamp
+        )
+        db.session.add(pred_entry)
+        db.session.commit()
+
         results.append({
+            'pred_res_id':      pred_res_id,
             'drop_index':       idx,
             'message':          message,
             'google_maps_link': maps_link,
@@ -320,3 +380,22 @@ def predict_r1_logic():
 @predict_bp.route("/predict_r1", methods=['POST'])
 def predict_r1():
     return predict_r1_logic()
+
+@predict_bp.route("/save_prediction", methods=['POST'])
+def save_prediction():
+    data = request.get_json()
+    if not data or 'pred_res_id' not in data:
+        return jsonify({'error': 'pred_res_id is required'}), 400
+
+    pred_res_id = data['pred_res_id']
+    pred = PredRes.query.filter_by(pred_res_id=pred_res_id).first()
+    if not pred:
+        return jsonify({'error': f'Prediction with ID {pred_res_id} not found'}), 404
+
+    pred.is_saved = True
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Prediction saved successfully',
+        'pred_res_id': pred_res_id
+    }), 200
