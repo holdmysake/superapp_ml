@@ -40,9 +40,11 @@ def predict(tline_id):
     if not spots:
         return jsonify({'error': 'No spots found for the given trunkline'}), 404
 
-    sensor_locations = [spot.kp_pos    for spot in spots]
-    sensor_names     = [spot.spot_name for spot in spots]
-    n_sensors        = len(sensor_locations)
+    sensor_locations = [spot.kp_pos for spot in spots]
+    hist_path = f"data/{tline_id}/json.json"
+    hist_data = load_historical_data(hist_path)
+
+    n_sensors = len(sensor_locations)
 
     if len(normal) != n_sensors:
         return jsonify({'error': f'normal harus {n_sensors} elemen'}), 400
@@ -55,12 +57,7 @@ def predict(tline_id):
 
     # Dynamic paths based on folder structure matching tline_id
     xlsx_path = f"data/{tline_id}/xlsx.xlsx"
-    json_path = f"data/{tline_id}/json.json"
-
     coords = load_coords(xlsx_path)
-
-    # Load historical calibration data if the JSON file exists
-    hist_data = load_historical_data(json_path)
 
     results = []
     for idx, drop_arr in enumerate(drop_list):
