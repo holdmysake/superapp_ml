@@ -136,14 +136,18 @@ def predict(tline_id):
             )
         ).all()
 
-        similar_list = []
+        drafts_list = []
+        saved_list = []
         for p in similar_preds:
-            similar_list.append({
-                'pred_res_id': p.pred_res_id,
-                'final_estimate': p.final_estimate,
-                'timestamp': p.timestamp.isoformat(),
-                'is_saved': p.is_saved
-            })
+            item = {
+                'id': p.pred_res_id,
+                'kp': p.final_estimate,
+                'time': p.timestamp.isoformat()
+            }
+            if p.is_saved:
+                saved_list.append(item)
+            else:
+                drafts_list.append(item)
 
         pred_res_id = generate_pred_res_id()
         timestamp = datetime.now()
@@ -183,8 +187,8 @@ def predict(tline_id):
             'regions':          prediction.get('regions', []),
             'hgl_fit':          None,
             'sensors':          sensor_details,
-            'has_similar_prediction_today': len(similar_preds) > 0,
-            'similar_predictions_today':    similar_list
+            'sim_drafts':       drafts_list,
+            'sim_saved':        saved_list
         })
     
     return jsonify(results), 200
@@ -377,14 +381,18 @@ def predict_r1_logic():
             )
         ).all()
 
-        similar_list = []
+        drafts_list = []
+        saved_list = []
         for p in similar_preds:
-            similar_list.append({
-                'pred_res_id': p.pred_res_id,
-                'final_estimate': p.final_estimate,
-                'timestamp': p.timestamp.isoformat(),
-                'is_saved': p.is_saved
-            })
+            item = {
+                'id': p.pred_res_id,
+                'kp': p.final_estimate,
+                'time': p.timestamp.isoformat()
+            }
+            if p.is_saved:
+                saved_list.append(item)
+            else:
+                drafts_list.append(item)
 
         pred_res_id = generate_pred_res_id()
         timestamp = datetime.now()
@@ -424,8 +432,8 @@ def predict_r1_logic():
             'regions':          prediction.get('regions', []),
             'hgl_fit':          prediction.get('hgl_fit'),
             'sensors':          sensor_details,
-            'has_similar_prediction_today': len(similar_preds) > 0,
-            'similar_predictions_today':    similar_list
+            'sim_drafts':       drafts_list,
+            'sim_saved':        saved_list
         })
     
     return jsonify(results), 200
