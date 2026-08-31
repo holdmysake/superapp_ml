@@ -119,6 +119,32 @@ def predict(tline_id):
                 'hgl_drop': None,
             })
 
+        # Check similar predictions (is_saved=False: today only, is_saved=True: anytime)
+        today_start = datetime.combine(datetime.now().date(), datetime.min.time())
+        today_end = datetime.combine(datetime.now().date(), datetime.max.time())
+        buffer_km = 0.1
+
+        from sqlalchemy import or_, and_
+        similar_preds = PredRes.query.filter(
+            PredRes.tline_id == tline_id,
+            PredRes.final_estimate >= final_kp - buffer_km,
+            PredRes.final_estimate <= final_kp + buffer_km
+        ).filter(
+            or_(
+                and_(PredRes.is_saved == False, PredRes.timestamp >= today_start, PredRes.timestamp <= today_end),
+                PredRes.is_saved == True
+            )
+        ).all()
+
+        similar_list = []
+        for p in similar_preds:
+            similar_list.append({
+                'pred_res_id': p.pred_res_id,
+                'final_estimate': p.final_estimate,
+                'timestamp': p.timestamp.isoformat(),
+                'is_saved': p.is_saved
+            })
+
         pred_res_id = generate_pred_res_id()
         timestamp = datetime.now()
 
@@ -156,7 +182,9 @@ def predict(tline_id):
             'gradients':        prediction.get('gradients', {}),
             'regions':          prediction.get('regions', []),
             'hgl_fit':          None,
-            'sensors':          sensor_details
+            'sensors':          sensor_details,
+            'has_similar_prediction_today': len(similar_preds) > 0,
+            'similar_predictions_today':    similar_list
         })
     
     return jsonify(results), 200
@@ -332,6 +360,32 @@ def predict_r1_logic():
                 'hgl_drop': float(analyzer.hgl_drop[i]) if analyzer.hgl_drop is not None else None,
             })
 
+        # Check similar predictions (is_saved=False: today only, is_saved=True: anytime)
+        today_start = datetime.combine(datetime.now().date(), datetime.min.time())
+        today_end = datetime.combine(datetime.now().date(), datetime.max.time())
+        buffer_km = 0.1
+
+        from sqlalchemy import or_, and_
+        similar_preds = PredRes.query.filter(
+            PredRes.tline_id == "r1",
+            PredRes.final_estimate >= final_kp - buffer_km,
+            PredRes.final_estimate <= final_kp + buffer_km
+        ).filter(
+            or_(
+                and_(PredRes.is_saved == False, PredRes.timestamp >= today_start, PredRes.timestamp <= today_end),
+                PredRes.is_saved == True
+            )
+        ).all()
+
+        similar_list = []
+        for p in similar_preds:
+            similar_list.append({
+                'pred_res_id': p.pred_res_id,
+                'final_estimate': p.final_estimate,
+                'timestamp': p.timestamp.isoformat(),
+                'is_saved': p.is_saved
+            })
+
         pred_res_id = generate_pred_res_id()
         timestamp = datetime.now()
 
@@ -369,7 +423,9 @@ def predict_r1_logic():
             'gradients':        prediction.get('gradients', {}),
             'regions':          prediction.get('regions', []),
             'hgl_fit':          prediction.get('hgl_fit'),
-            'sensors':          sensor_details
+            'sensors':          sensor_details,
+            'has_similar_prediction_today': len(similar_preds) > 0,
+            'similar_predictions_today':    similar_list
         })
     
     return jsonify(results), 200
